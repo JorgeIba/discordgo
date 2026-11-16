@@ -142,7 +142,7 @@ func openWithTimeout(t *testing.T, session *Session) error {
 func TestOpenAnswersHeartbeatRequestsDuringHandshake(t *testing.T) {
 	for _, resume := range []bool{false, true} {
 		for _, compressed := range []bool{false, true} {
-			for _, nextOp := range []int{0, 7, 9, 11} {
+			for _, nextOp := range []int{0, 7, 9, gatewayOpHeartbeatACK} {
 				t.Run(fmt.Sprintf("resume=%t/compressed=%t/next_op=%d", resume, compressed, nextOp), func(t *testing.T) {
 					result := make(chan error, 1)
 					upgrader := websocket.Upgrader{}

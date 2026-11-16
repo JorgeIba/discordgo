@@ -24,6 +24,8 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+const gatewayOpHeartbeatACK = 11
+
 // ErrWSAlreadyOpen is thrown when you attempt to open
 // a websocket that already is open.
 var ErrWSAlreadyOpen = errors.New("web socket already opened")
@@ -192,7 +194,7 @@ func (s *Session) Open() error {
 		// Handle them here: onEvent's Op 11 handler would acquire the
 		// session lock that Open already holds.
 		startupEvent, peekErr := peekGatewayEvent(mt, m)
-		if peekErr == nil && startupEvent != nil && startupEvent.Operation == 11 && pendingHeartbeats > 0 {
+		if peekErr == nil && startupEvent != nil && startupEvent.Operation == gatewayOpHeartbeatACK && pendingHeartbeats > 0 {
 			pendingHeartbeats--
 			s.LastHeartbeatAck = time.Now().UTC()
 			continue
@@ -747,7 +749,7 @@ func (s *Session) onEvent(messageType int, message []byte) (*Event, error) {
 		return e, nil
 	}
 
-	if e.Operation == 11 {
+	if e.Operation == gatewayOpHeartbeatACK {
 		s.Lock()
 		s.LastHeartbeatAck = time.Now().UTC()
 		s.Unlock()
