@@ -182,10 +182,20 @@ func (s *Session) Open() error {
 
 	// Now Discord should send us a READY or RESUMED packet. It may request
 	// heartbeats first; answer those and keep waiting for the first dispatch.
+	pendingHeartbeats := 0
 	for {
 		mt, m, err = s.wsConn.ReadMessage()
 		if err != nil {
 			return err
+		}
+		// Acknowledgements for our replies may precede READY/RESUMED.
+		// Handle them here: onEvent's Op 11 handler would acquire the
+		// session lock that Open already holds.
+		startupEvent, peekErr := peekGatewayEvent(mt, m)
+		if peekErr == nil && startupEvent != nil && startupEvent.Operation == 11 && pendingHeartbeats > 0 {
+			pendingHeartbeats--
+			s.LastHeartbeatAck = time.Now().UTC()
+			continue
 		}
 		err = s.openGatewayControlEvent(mt, m, 0)
 		if err != nil {
@@ -198,6 +208,7 @@ func (s *Session) Open() error {
 		if e.Operation != 1 {
 			break
 		}
+		pendingHeartbeats++
 	}
 	if e.Type != `READY` && e.Type != `RESUMED` {
 		// This is not fatal, but it does not follow their API documentation.

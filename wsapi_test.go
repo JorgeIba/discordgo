@@ -16,6 +16,7 @@ import (
 
 func TestOpenReturnsOnInvalidSessionDuringOpen(t *testing.T) {
 	server := newGatewayOpenTestServer(t, []byte(`{"op":9,"d":false}`))
+	defer server.Close()
 	session, err := newGatewayOpenTestSession(server, "Bot test")
 	if err != nil {
 		t.Fatalf("error creating session: %v", err)
@@ -45,6 +46,7 @@ func TestOpenReturnsOnInvalidSessionDuringOpen(t *testing.T) {
 
 func TestOpenReturnsOnHeartbeatAckDuringOpen(t *testing.T) {
 	server := newGatewayOpenTestServer(t, []byte(`{"op":11,"d":null}`))
+	defer server.Close()
 	session, err := newGatewayOpenTestSession(server, "Bot test")
 	if err != nil {
 		t.Fatalf("error creating session: %v", err)
@@ -64,6 +66,7 @@ func TestOpenReturnsOnHeartbeatAckDuringOpen(t *testing.T) {
 // otherwise resuming would churn reconnects.
 func TestOpenAllowsDispatchDuringOpen(t *testing.T) {
 	server := newGatewayOpenTestServer(t, []byte(`{"op":0,"s":1,"t":"PRESENCE_UPDATE","d":{"guild_id":"guild","user":{"id":"user"},"status":"online","activities":[],"client_status":{}}}`))
+	defer server.Close()
 	session, err := newGatewayOpenTestSession(server, "Bot test")
 	if err != nil {
 		t.Fatalf("error creating session: %v", err)
@@ -72,7 +75,7 @@ func TestOpenAllowsDispatchDuringOpen(t *testing.T) {
 	session.sessionID = "old-session"
 	session.resumeGatewayURL = session.gateway
 	atomic.StoreInt64(session.sequence, 42)
-	t.Cleanup(func() { _ = session.Close() })
+	defer session.Close()
 
 	if err = openWithTimeout(t, session); err != nil {
 		t.Fatalf("expected Open to succeed on a replayed dispatch before RESUMED, got: %v", err)
@@ -102,7 +105,6 @@ func newGatewayOpenTestServer(t *testing.T, startupPacket []byte) *httptest.Serv
 		time.Sleep(50 * time.Millisecond)
 	}))
 
-	t.Cleanup(server.Close)
 	return server
 }
 
@@ -188,6 +190,10 @@ func TestOpenAnswersHeartbeatRequestsDuringHandshake(t *testing.T) {
 							}
 							if heartbeat.Op != 1 || heartbeat.Data != wantSequence {
 								result <- fmt.Errorf("heartbeat = %+v, want opcode 1 and sequence %d", heartbeat, wantSequence)
+								return
+							}
+							if err = writeHandshakeTestFrame(conn, []byte(`{"op":11,"d":null}`), compressed); err != nil {
+								result <- err
 								return
 							}
 						}
