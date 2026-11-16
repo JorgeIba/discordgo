@@ -180,18 +180,24 @@ func (s *Session) Open() error {
 		s.State = state
 	}
 
-	// Now Discord should send us a READY or RESUMED packet.
-	mt, m, err = s.wsConn.ReadMessage()
-	if err != nil {
-		return err
-	}
-	err = s.openGatewayControlEvent(mt, m, 0)
-	if err != nil {
-		return err
-	}
-	e, err = s.onEvent(mt, m)
-	if err != nil {
-		return err
+	// Now Discord should send us a READY or RESUMED packet. It may request
+	// heartbeats first; answer those and keep waiting for the first dispatch.
+	for {
+		mt, m, err = s.wsConn.ReadMessage()
+		if err != nil {
+			return err
+		}
+		err = s.openGatewayControlEvent(mt, m, 0)
+		if err != nil {
+			return err
+		}
+		e, err = s.onEvent(mt, m)
+		if err != nil {
+			return err
+		}
+		if e.Operation != 1 {
+			break
+		}
 	}
 	if e.Type != `READY` && e.Type != `RESUMED` {
 		// This is not fatal, but it does not follow their API documentation.
@@ -256,8 +262,14 @@ func (s *Session) openGatewayControlEvent(messageType int, message []byte, expec
 		return fmt.Errorf("received Op 9 invalid session during open")
 	}
 
-	// Any non-dispatch opcode other than the expected one would also re-enter
-	// the lock via onEvent; abort. Dispatches (Op 0) are passed through.
+	// After Identify/Resume, heartbeat requests are safe: onEvent replies
+	// using only wsMutex, without acquiring the session lock held by Open.
+	if expectedOperation == 0 && e.Operation == 1 {
+		return nil
+	}
+
+	// Pass through dispatches and the expected opcode. Reject other control
+	// events so onEvent cannot re-enter the session lock held by Open.
 	if e.Operation != 0 && e.Operation != expectedOperation {
 		return fmt.Errorf("received Op %d during open, expected Op %d", e.Operation, expectedOperation)
 	}
