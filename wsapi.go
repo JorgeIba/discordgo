@@ -24,6 +24,8 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+const gatewayOpHeartbeatACK = 11
+
 // ErrWSAlreadyOpen is thrown when you attempt to open
 // a websocket that already is open.
 var ErrWSAlreadyOpen = errors.New("web socket already opened")
@@ -115,6 +117,10 @@ func (s *Session) Open() error {
 	if err != nil {
 		return err
 	}
+	err = s.openGatewayControlEvent(mt, m, 10)
+	if err != nil {
+		return err
+	}
 	e, err := s.onEvent(mt, m)
 	if err != nil {
 		return err
@@ -176,14 +182,35 @@ func (s *Session) Open() error {
 		s.State = state
 	}
 
-	// Now Discord should send us a READY or RESUMED packet.
-	mt, m, err = s.wsConn.ReadMessage()
-	if err != nil {
-		return err
-	}
-	e, err = s.onEvent(mt, m)
-	if err != nil {
-		return err
+	// Now Discord should send us a READY or RESUMED packet. It may request
+	// heartbeats first; answer those and keep waiting for the first dispatch.
+	pendingHeartbeats := 0
+	for {
+		mt, m, err = s.wsConn.ReadMessage()
+		if err != nil {
+			return err
+		}
+		// Acknowledgements for our replies may precede READY/RESUMED.
+		// Handle them here: onEvent's Op 11 handler would acquire the
+		// session lock that Open already holds.
+		startupEvent, peekErr := peekGatewayEvent(mt, m)
+		if peekErr == nil && startupEvent != nil && startupEvent.Operation == gatewayOpHeartbeatACK && pendingHeartbeats > 0 {
+			pendingHeartbeats--
+			s.LastHeartbeatAck = time.Now().UTC()
+			continue
+		}
+		err = s.openGatewayControlEvent(mt, m, 0)
+		if err != nil {
+			return err
+		}
+		e, err = s.onEvent(mt, m)
+		if err != nil {
+			return err
+		}
+		if e.Operation != 1 {
+			break
+		}
+		pendingHeartbeats++
 	}
 	if e.Type != `READY` && e.Type != `RESUMED` {
 		// This is not fatal, but it does not follow their API documentation.
@@ -212,6 +239,78 @@ func (s *Session) Open() error {
 
 	s.log(LogInformational, "exiting")
 	return nil
+}
+
+// openGatewayControlEvent inspects the first frame of a freshly opened gateway
+// connection without dispatching it. Open holds the session write lock while it
+// reads the post-Hello and post-Identify/Resume frames, so any frame that would
+// re-enter that lock through onEvent (Op 7 reconnect, Op 9 invalid session and
+// Op 11 heartbeat ack all call Close/Lock) must abort Open instead of being
+// processed, otherwise the goroutine self-deadlocks (bwmarrin/discordgo#513).
+//
+// Dispatch frames (Op 0) are safe to pass through: their handlers run
+// asynchronously unless SyncEvents is set, and Discord legitimately replays
+// buffered dispatches before the RESUMED marker on a successful resume. Aborting
+// on them would break resuming and churn reconnects, so they are handed to
+// onEvent as usual.
+func (s *Session) openGatewayControlEvent(messageType int, message []byte, expectedOperation int) error {
+	e, err := peekGatewayEvent(messageType, message)
+	if err != nil || e == nil {
+		return nil
+	}
+
+	switch e.Operation {
+	case 7:
+		return fmt.Errorf("received Op 7 reconnect during open")
+	case 9:
+		var resumable bool
+		if err := json.Unmarshal(e.RawData, &resumable); err != nil {
+			return fmt.Errorf("error unmarshalling invalid session event, %s", err)
+		}
+		if !resumable {
+			s.resumeGatewayURL = ""
+			s.sessionID = ""
+			atomic.StoreInt64(s.sequence, 0)
+		}
+		return fmt.Errorf("received Op 9 invalid session during open")
+	}
+
+	// After Identify/Resume, heartbeat requests are safe: onEvent replies
+	// using only wsMutex, without acquiring the session lock held by Open.
+	if expectedOperation == 0 && e.Operation == 1 {
+		return nil
+	}
+
+	// Pass through dispatches and the expected opcode. Reject other control
+	// events so onEvent cannot re-enter the session lock held by Open.
+	if e.Operation != 0 && e.Operation != expectedOperation {
+		return fmt.Errorf("received Op %d during open, expected Op %d", e.Operation, expectedOperation)
+	}
+
+	return nil
+}
+
+func peekGatewayEvent(messageType int, message []byte) (*Event, error) {
+	var reader io.Reader
+	reader = bytes.NewBuffer(message)
+
+	if messageType == websocket.BinaryMessage {
+		z, err := zlib.NewReader(reader)
+		if err != nil {
+			return nil, err
+		}
+		defer z.Close()
+
+		reader = z
+	}
+
+	var e *Event
+	decoder := json.NewDecoder(reader)
+	if err := decoder.Decode(&e); err != nil {
+		return e, err
+	}
+
+	return e, nil
 }
 
 // listen polls the websocket connection for events, it will stop when the
@@ -650,7 +749,7 @@ func (s *Session) onEvent(messageType int, message []byte) (*Event, error) {
 		return e, nil
 	}
 
-	if e.Operation == 11 {
+	if e.Operation == gatewayOpHeartbeatACK {
 		s.Lock()
 		s.LastHeartbeatAck = time.Now().UTC()
 		s.Unlock()
